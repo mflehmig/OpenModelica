@@ -27,6 +27,9 @@
  * CONDITIONS OF OSMC-PL.
  *
  */
+#ifdef USE_PARJAC
+  #include <omp.h>
+#endif
 
 #include <string.h>
 #include <setjmp.h>
@@ -198,6 +201,7 @@ int dassl_initial(DATA* data, threadData_t *threadData,
   dasslData->newdelta = (double*) malloc(N*sizeof(double));
   dasslData->stateDer = (double*) calloc(N, sizeof(double));
   dasslData->states = (double*) malloc(N*sizeof(double));
+  dasslData->allocatedParMem = 0;   /* false */
 
   data->simulationInfo->currentContext = CONTEXT_ALGEBRAIC;
 
@@ -368,9 +372,17 @@ int dassl_initial(DATA* data, threadData_t *threadData,
     case COLOREDSYMJAC:
       data->simulationInfo->jacobianEvals = data->simulationInfo->analyticJacobians[data->callback->INDEX_JAC_A].sparsePattern->maxColors;
       dasslData->jacobianFunction =  jacA_symColored;
+#ifdef USE_PARJAC
+      allocateThreadLocalJacobians(data, &(dasslData->jacColumns));
+      dasslData->allocatedParMem = 1;   /* true */
+#endif
       break;
     case SYMJAC:
       dasslData->jacobianFunction =  jacA_sym;
+#ifdef USE_PARJAC
+      allocateThreadLocalJacobians(data, &(dasslData->jacColumns));
+      dasslData->allocatedParMem = 1;   /* true */
+#endif
       break;
     case NUMJAC:
       dasslData->jacobianFunction =  jacA_num;
@@ -443,6 +455,13 @@ int dassl_deinitial(DASSL_DATA *dasslData)
   free(dasslData->newdelta);
   free(dasslData->states);
   free(dasslData->stateDer);
+
+#ifdef USE_PARJAC
+  if (dasslData->allocatedParMem) {
+      freeAnalyticalJacobian(dasslData->jacColumns);
+      dasslData->allocatedParMem = 0;
+  }
+#endif
 
   free(dasslData);
 
@@ -920,8 +939,13 @@ int jacA_symColored(double *t, double *y, double *yprime, double *delta,
   threadData_t *threadData = (threadData_t*)(void*)((double**)rpar)[2];
   DASSL_DATA* dasslData = (DASSL_DATA*)(void*)((double**)rpar)[1];
 
+#ifdef USE_PARJAC
+  ANALYTIC_JACOBIAN* jac = (dasslData->jacColumns);
+#else
   const int index = data->callback->INDEX_JAC_A;
   ANALYTIC_JACOBIAN* jac = &(data->simulationInfo->analyticJacobians[index]);
+#endif
+
   unsigned int columns = jac->sizeCols;
   unsigned int rows = jac->sizeRows;
   unsigned int sizeTmpVars = jac->sizeTmpVars;
@@ -939,6 +963,7 @@ int jacA_symColored(double *t, double *y, double *yprime, double *delta,
  *
  *
  * This function calculates symbolically the jacobian matrix.
+ * Can calculate the jacobian in parallel.
  */
 int jacA_sym(double *t, double *y, double *yprime, double *delta,
              double *matrixA, double *cj, double *h, double *wt, double *rpar,
@@ -956,9 +981,19 @@ int jacA_sym(double *t, double *y, double *yprime, double *delta,
   unsigned int rows = jac->sizeRows;
   unsigned int sizeTmpVars = jac->sizeTmpVars;
   unsigned int i;
-  ANALYTIC_JACOBIAN* t_jac = &(data->simulationInfo->analyticJacobians[index]);
 
+#pragma omp parallel default(none) firstprivate(columns, rows, sizeTmpVars) shared(i, matrixA, data, threadData, dasslData)
+{
+#ifdef USE_PARJAC
+  // Use thread local analytic Jacobians
+  ANALYTIC_JACOBIAN* t_jac = &(dasslData->jacColumns[omp_get_thread_num()]);
+  //printf("index= %d, t_jac->sizeCols= %d, t_jac->sizeRows = %d, t_jac->sizeTmpVars = %d \n",index, t_jac->sizeCols , t_jac->sizeRows, t_jac->sizeTmpVars);
+#else
+  ANALYTIC_JACOBIAN* t_jac = jac;
+#endif
   unsigned int j;
+
+#pragma omp for schedule(runtime)
   for(i=0; i < columns; i++)
   {
     t_jac->seedVars[i] = 1.0;
@@ -968,7 +1003,8 @@ int jacA_sym(double *t, double *y, double *yprime, double *delta,
       matrixA[i*columns+j] = t_jac->resultVars[j];
 
     t_jac->seedVars[i] = 0.0;
-  }
+  } // for loop
+} // omp parallel
 
   TRACE_POP
   return 0;
