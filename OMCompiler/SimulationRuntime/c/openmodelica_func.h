@@ -71,7 +71,7 @@ void (*initialNonLinearSystem)(int nNonLinearSystems, NONLINEAR_SYSTEM_DATA *dat
 
 /*! \fn initialLinearSystem
  *
- *  This function initialize nonlinear system structure.
+ *  This function initialize linear system structure.
  *
  *  \param [ref] [data]
  */
